@@ -1,5 +1,5 @@
-# 使用DQN网络，一帧一帧传入，基于价值选取动作,加入经验回放，利用经验池更新网络参数
-
+# 使用策略梯度网络，一局一局游戏传入，基于概率选择动作，加入奖励衰减机制处理奖励，最大化概率*奖励以更新策略网络
+# Gym-Pong游戏
 import gym
 import time
 import cv2 as cv
@@ -14,12 +14,11 @@ from collections import deque
 env = gym.make('Pong-v4')
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-# DQN网络
 class DQN_Q_Net(nn.Module):
     def __init__(self, n_actions=6):
         super(DQN_Q_Net,self).__init__()
         # 卷积层
-        self.conv1 = nn.Conv2d(4, 16, kernel_size=8, stride=4, padding=1)
+        self.conv1 = nn.Conv2d(1, 16, kernel_size=8, stride=4, padding=1)
         self.conv2 = nn.Conv2d(16, 32, kernel_size=4, stride=2, padding=1)
         self.conv3 = nn.Conv2d(32, 64, kernel_size=3, stride=1, padding=1)
         # 池化层
@@ -46,7 +45,7 @@ class DQN_Q_Net(nn.Module):
 
         # 对每一帧图像压平
         x = x.view(x.size(0), -1)
-
+        
         x = self.linear1(x)
         x = self.ReLU(x)
         
@@ -54,10 +53,12 @@ class DQN_Q_Net(nn.Module):
         x = self.ReLU(x)
  
         output=self.linear3(x)
+        ##### 计算概率
+        output = self.Softmax(output)
         return output
 
 class Breakout_agent:
-    def __init__(self,env,action_n=6,gamma=0.99, batch_size=64,epsilon=0.01,
+    def __init__(self,env,action_n=6,gamma=0.99, batch_size=64,
                  learning_rate=0.0001,train_episode=5000,test_episode=5000,
                  replay_buffer_size=10000):
         # 智能体参数
@@ -65,7 +66,6 @@ class Breakout_agent:
         self.train_episode=train_episode
         self.test_episode=test_episode
         self.action_n=action_n
-        self.epsilon=epsilon
         self.batch_size = batch_size
         self.gamma=gamma
         self.count=0
@@ -73,52 +73,50 @@ class Breakout_agent:
 
         # 智能体网络
         self.net=DQN_Q_Net(action_n).to(device)
-        self.target_net=self.net.to(device)
         self.optimizer = optim.Adam(self.net.parameters(), lr=self.learning_rate)
-
-        # 经验池
-        self.replay_buffer=deque([],self.replay_buffer_size)
-
-    # 基于价值选取动作
+    # 基于概率选取动作
     def decide(self,state):
         state=state.to(device)
-        
-        if random.random() >self.epsilon:
-            with torch.no_grad():
-                action=self.net.forward(state)
-            return action.argmax()
-        else:
-            return torch.tensor(np.random.randint(self.action_n)).to(device)
-        
-    def learn(self):
-        if len(self.replay_buffer)<self.batch_size:
-            return 
-        experiences = random.sample(self.replay_buffer,self.batch_size)
-        states,actions,rewards,next_states,dones=zip(*experiences)
-        states = torch.stack(states)
-        next_states = torch.stack(next_states)
-        actions = torch.stack(actions).unsqueeze(1)
-        dones = torch.stack(dones).unsqueeze(1)
-        rewards = torch.stack(rewards).unsqueeze(1)
-        # 计算Q值
-        Q_value = self.net(states).gather(1,actions)
         with torch.no_grad():
-            next_Q_value = self.target_net(next_states).max(1)[0].view(-1,1)
-        new_Q_value = rewards + self.gamma * next_Q_value *(~dones)
-        loss = torch.mean(nn.functional.mse_loss(Q_value,new_Q_value))
+            probs=self.net.forward(state)
+        probs=probs.squeeze(0)
+        probs = probs.cpu().numpy()
+        return np.random.choice(len(probs),1,p=probs)
+    # 测试时，选取最大概率的动作
+    def test_decide(self,state):
+        state=state.to(device)
+        with torch.no_grad():
+            probs=self.net.forward(state)
+        probs=probs.squeeze(0)
+        probs = probs.cpu().numpy()
+        return probs.argmax().numpy() 
+    # 奖励衰减函数
+    def calc_reward_to_go(self,reward_list, gamma=0.99):
+        reward_arr = np.array(reward_list)
+        for i in range(len(reward_arr) - 2, -1, -1):
+            # 递推衰减
+            reward_arr[i] += gamma * reward_arr[i + 1]
+        # 标准化奖励
+        reward_arr -= np.mean(reward_arr)
+        reward_arr /= np.std(reward_arr)
+        reward_arr = torch.from_numpy(reward_arr).to(device)
+        return reward_arr
+    # 学习函数
+    def learn(self,states,actions,rewards):
+        probs = self.net(states)
+        rewards = self.calc_reward_to_go(rewards)
+        actions = torch.stack(actions).T
+        log_probs = torch.distributions.Categorical(probs).log_prob(actions)
         self.optimizer.zero_grad()
-        loss.backward()
+        loss = -torch.mean(log_probs * rewards)
+        loss.backward()                                                                                                                                                              
         self.optimizer.step()
-        if self.count % 3000 == 0:
-            self.target_net.load_state_dict(self.net.state_dict())
-        self.count+=1
         return loss
-        
     # 保存和读取历史网络参数
-    def save(self, filename='dqn_model.pth'):
+    def save(self, filename='p_net_model.pth'):
         torch.save(self.net.state_dict(), filename)
         print(f"Model saved to {filename}")
-    def load(self, filename='dqn_model.pth'):
+    def load(self, filename='p_net_model.pth'):
         self.net.load_state_dict(torch.load(filename))
         self.net.eval()
         print(f"Model loaded from {filename}")
@@ -131,7 +129,12 @@ def preprocess(image):
     image[image == 144] = 0  # 擦除背景 (background type 1)
     image[image == 109] = 0  # 擦除背景 
     image[image != 0] = 1  # 转为灰度图，除了黑色外其他都是白色
+    image=np.array(image)
+    image=torch.from_numpy(image).float()
+    image=image.to(device)
+    image = image.unsqueeze(0)
     return image 
+
 
 # 训练函数
 def train(agent,env):
@@ -139,28 +142,16 @@ def train(agent,env):
     episode_reward=0
     state=env.reset()
     state=preprocess(state)
-    state=np.array(state)
-    state=torch.from_numpy(state).float()
-    # state=torch.flatten(state)
-    state=state.to(device)
-    frames = [state,state,state,state]
+    frames, actions, rewards = [], [], []
     while True:
+        frames.append(state)
         env.render()
-        action=agent.decide(torch.stack(frames).unsqueeze(0))
-        
+        action=agent.decide(state.unsqueeze(0))
+        action = torch.tensor(action).to(device)
+        actions.append(action)
         next_state, reward, done, info = env.step(action)
         next_state=preprocess(next_state)
-        next_state=np.array(next_state)
-        next_state=torch.from_numpy(next_state).float()
-        # next_state=torch.flatten(next_state)
-        next_state=next_state.to(device)
-        next_frames = frames
-        next_frames.append(next_state)
-        next_frames.pop(0)
-        reward = torch.tensor(reward).to(device)
-        done = torch.tensor(done).to(device)
-        agent.replay_buffer.append([torch.stack(frames),action,reward,torch.stack(next_frames),done])
-        loss=agent.learn()
+        rewards.append(reward)
         episode_reward+=reward
         # agent.save()
         if done:
@@ -168,6 +159,8 @@ def train(agent,env):
             break
         state = next_state
     episode_reward = int(episode_reward)
+    loss=agent.learn(torch.stack(frames),actions,rewards)
+    print(loss)
     return episode_reward
 
 # 测试函数
@@ -176,19 +169,12 @@ def test(agent,env):
     episode_reward=0
     state=env.reset()
     state=preprocess(state)
-    state=np.array(state)
-    state=torch.from_numpy(state).float()
-    # state=torch.flatten(state)
-    state=state.to(device)
     while True:
         env.render()
-        action=agent.decide(state)
+        action=agent.test_decide(state.unsqueeze(0))
+        action = torch.tensor(action).to(device)
         next_state, reward, done, info = env.step(action)
         next_state=preprocess(next_state)
-        next_state=np.array(next_state)
-        next_state=torch.from_numpy(next_state).float()
-        # next_state=torch.flatten(next_state)
-        next_state=next_state.to(device)
         episode_reward+=reward
         # agent.save()
         if done:
