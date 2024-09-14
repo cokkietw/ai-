@@ -19,7 +19,7 @@ class DQN_Q_Net(nn.Module):
     def __init__(self, n_actions=6):
         super(DQN_Q_Net,self).__init__()
         # 卷积层
-        self.conv1 = nn.Conv2d(4, 16, kernel_size=8, stride=4, padding=1)
+        self.conv1 = nn.Conv2d(1, 16, kernel_size=8, stride=4, padding=1)
         self.conv2 = nn.Conv2d(16, 32, kernel_size=4, stride=2, padding=1)
         self.conv3 = nn.Conv2d(32, 64, kernel_size=3, stride=1, padding=1)
         # 池化层
@@ -73,7 +73,8 @@ class Breakout_agent:
 
         # 智能体网络
         self.net=DQN_Q_Net(action_n).to(device)
-        self.target_net=self.net.to(device)
+        self.target_net=DQN_Q_Net(action_n).to(device)
+        self.target_net.load_state_dict(self.net.state_dict())
         self.optimizer = optim.Adam(self.net.parameters(), lr=self.learning_rate)
 
         # 经验池
@@ -104,13 +105,14 @@ class Breakout_agent:
         Q_value = self.net(states).gather(1,actions)
         with torch.no_grad():
             next_Q_value = self.target_net(next_states).max(1)[0].view(-1,1)
-        new_Q_value = rewards + self.gamma * next_Q_value *(~dones)
+        new_Q_value =rewards + self.gamma * next_Q_value
         loss = torch.mean(nn.functional.mse_loss(Q_value,new_Q_value))
         self.optimizer.zero_grad()
         loss.backward()
         self.optimizer.step()
         if self.count % 3000 == 0:
             self.target_net.load_state_dict(self.net.state_dict())
+            self.count=0
         self.count+=1
         return loss
         
@@ -120,7 +122,9 @@ class Breakout_agent:
         print(f"Model saved to {filename}")
     def load(self, filename='dqn_model.pth'):
         self.net.load_state_dict(torch.load(filename))
+        self.target_net.load_state_dict(torch.load(filename))
         self.net.eval()
+        self.target_net.eval()
         print(f"Model loaded from {filename}")
 
 # 状态处理
@@ -142,25 +146,21 @@ def train(agent,env):
     state=np.array(state)
     state=torch.from_numpy(state).float()
     # state=torch.flatten(state)
-    state=state.to(device)
-    frames = [state,state,state,state]
+    state=state.to(device).unsqueeze(0)
     while True:
         env.render()
-        action=agent.decide(torch.stack(frames).unsqueeze(0))
+        action=agent.decide(state.unsqueeze(0))
         
         next_state, reward, done, info = env.step(action)
         next_state=preprocess(next_state)
         next_state=np.array(next_state)
         next_state=torch.from_numpy(next_state).float()
         # next_state=torch.flatten(next_state)
-        next_state=next_state.to(device)
-        next_frames = frames
-        next_frames.append(next_state)
-        next_frames.pop(0)
+        next_state=next_state.to(device).unsqueeze(0)
         reward = torch.tensor(reward).to(device)
         done = torch.tensor(done).to(device)
-        agent.replay_buffer.append([torch.stack(frames),action,reward,torch.stack(next_frames),done])
-        loss=agent.learn()
+        agent.replay_buffer.append([state,action,reward,next_state,done])
+        agent.learn()
         episode_reward+=reward
         # agent.save()
         if done:
@@ -179,16 +179,16 @@ def test(agent,env):
     state=np.array(state)
     state=torch.from_numpy(state).float()
     # state=torch.flatten(state)
-    state=state.to(device)
+    state=state.to(device).unsqueeze(0)
     while True:
         env.render()
-        action=agent.decide(state)
+        action=agent.decide(state.unsqueeze(0))
         next_state, reward, done, info = env.step(action)
         next_state=preprocess(next_state)
         next_state=np.array(next_state)
         next_state=torch.from_numpy(next_state).float()
         # next_state=torch.flatten(next_state)
-        next_state=next_state.to(device)
+        next_state=next_state.to(device).unsqueeze(0)
         episode_reward+=reward
         # agent.save()
         if done:
@@ -207,16 +207,16 @@ def draw(rewards):
 
 
 agent=Breakout_agent(env)
-# agent.load()
+agent.load()
 
 episode_rewards=[]
 for episode in range(agent.train_episode):
     episode_reward=train(agent,env)
     print("train episode:",episode+1,"reward:",episode_reward)
     episode_rewards.append(episode_reward)
-    if episode % 50 ==0:
+    if (episode+1) % 50 ==0:
         agent.save()
-# draw(episode_rewards)
+draw(episode_rewards)
 
 agent.save()
 

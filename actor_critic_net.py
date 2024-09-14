@@ -54,6 +54,10 @@ class DQN_Net(nn.Module):
  
         output=self.linear3(x)
         return output
+    # def initialize_weights(self):
+    #     for m in self.modules():
+    #         nn.init.normal_(m.weight.data, 0, 0.1)
+    #         nn.init.constant_(m.bias.data, 0.01)
 # 策略网络
 class Q_Net(nn.Module):
     def __init__(self, n_actions=6):
@@ -97,10 +101,15 @@ class Q_Net(nn.Module):
         ##### 计算概率
         output = self.Softmax(output)
         return output
+    # def initialize_weights(self):
+    #     for m in self.modules():
+    #         nn.init.normal_(m.weight.data, 0, 0.1)
+    #         nn.init.constant_(m.bias.data, 0.01)
+
 # 智能体
 class Breakout_agent:
     def __init__(self,env,action_n=6,gamma=0.99, batch_size=64,
-                 learning_rate=0.0001,train_episode=5000,test_episode=5000,
+                 learning_rate=0.001,train_episode=5000,test_episode=5000,
                  replay_buffer_size=10000):
         # 智能体参数
         self.learning_rate=learning_rate
@@ -115,8 +124,13 @@ class Breakout_agent:
         # 智能体网络
         self.dqn = DQN_Net().to(device)
         self.act=Q_Net(action_n).to(device)
+        self.target_dqn=DQN_Net().to(device)
+        self.target_dqn.load_state_dict(self.dqn.state_dict())
         self.dqn_optimizer = optim.Adam(self.dqn.parameters(), lr=self.learning_rate)
         self.act_optimizer = optim.Adam(self.act.parameters(), lr=self.learning_rate)
+
+        # 经验池
+        self.replay_buffer=deque([],self.replay_buffer_size)
     # 基于概率选取动作
     def decide(self,state):
         state=state.to(device)
@@ -145,41 +159,53 @@ class Breakout_agent:
         reward_arr = torch.from_numpy(reward_arr).to(device)
         return reward_arr
     # 学习函数
-    def learn(self,states,actions,rewards):
-        # DQN预测状态价值，用此更新策略网络
-        dqn_rewards = self.dqn.forward(states) 
-        # 将实际奖励延申
-        rewards = self.calc_reward_to_go(rewards)
-        # 计算对数概率
-        probs = self.act(states)
-        actions = torch.stack(actions).T
-        log_probs = torch.distributions.Categorical(probs).log_prob(actions)
-        # 更新DQN网络
+    def learn(self):
+        if len(self.replay_buffer) < self.batch_size:
+            return
+        # 从缓冲区中抽样经验
+        batch = random.sample(self.replay_buffer,self.batch_size)
+        states, actions, rewards, next_states = zip(*batch)
+        
+        states = torch.stack(states).to(device)
+        actions = torch.tensor(actions).to(device)
+        rewards = torch.tensor(rewards).to(device)
+        next_states = torch.stack(next_states).to(device)
+        # DQN预测状态价值，用此更新评论家网络
+        v = self.dqn.forward(states)
+        with torch.no_grad():
+            next_v = self.target_dqn.forward(next_states)
+        reward = rewards.unsqueeze(1)
+        dqn_loss = nn.functional.mse_loss(v,reward + self.gamma * next_v)
         self.dqn_optimizer.zero_grad()
-        dqn_loss = torch.mean(nn.functional.mse_loss(dqn_rewards.float(),rewards.float().unsqueeze(1)))
         dqn_loss.backward()
         self.dqn_optimizer.step()
-        # 更新策略网络
+        
+        # 更新演员网络
+        with torch.no_grad():
+            td_error = reward + self.gamma * next_v - v
+        prob = self.act(states)
+        log_probs = torch.distributions.Categorical(prob).log_prob(actions)
         self.act_optimizer.zero_grad()
-        act_loss = -torch.mean(log_probs * dqn_rewards.detach())
-        act_loss.backward()                                                                                                                                                              
+        act_loss = -torch.mean(log_probs * td_error)
+        act_loss.backward()
         self.act_optimizer.step()
-        return
+        if self.count % 3000 == 0:
+            self.target_dqn.load_state_dict(self.dqn.state_dict())
+            self.count=0
+        self.count+=1
     # 保存和读取历史网络参数
-    def save_dqn(self, filename='actor_critic_dqn_net_model.pth'):
-        torch.save(self.dqn.state_dict(), filename)
-        print(f"Model saved to {filename}")
-    def save_act(self, filename='actor_critic_act_net_model.pth'):
-        torch.save(self.act.state_dict(), filename)
-        print(f"Model saved to {filename}")
-    def load_dqn(self, filename='actor_critic_dqn_net_model.pth'):
-        self.dqn.load_state_dict(torch.load(filename))
+    def Save(self):
+        torch.save(self.dqn.state_dict(), 'actor_critic_dqn_net_model.pth')
+        torch.save(self.act.state_dict(), 'actor_critic_act_net_model.pth')
+        print(f"Model saved")
+    def Load(self):
+        self.dqn.load_state_dict(torch.load('actor_critic_dqn_net_model.pth'))
+        self.target_dqn.load_state_dict(torch.load('actor_critic_dqn_net_model.pth'))
+        self.act.load_state_dict(torch.load('actor_critic_act_net_model.pth'))
         self.dqn.eval()
-        print(f"Model loaded from {filename}")
-    def load_act(self, filename='actor_critic_act_net_model.pth'):
-        self.act.load_state_dict(torch.load(filename))
         self.act.eval()
-        print(f"Model loaded from {filename}")
+        self.target_dqn.eval()
+        print(f"Model loaded")
 
 # 状态处理
 def preprocess(image):
@@ -193,8 +219,7 @@ def preprocess(image):
     image=torch.from_numpy(image).float()
     image=image.to(device)
     image = image.unsqueeze(0)
-    return image 
-
+    return image
 
 # 训练函数
 def train(agent,env):
@@ -202,16 +227,14 @@ def train(agent,env):
     episode_reward=0
     state=env.reset()
     state=preprocess(state)
-    frames, actions, rewards = [], [], []
     while True:
-        frames.append(state)
         env.render()
         action=agent.decide(state.unsqueeze(0))
         action = torch.tensor(action).to(device)
-        actions.append(action)
         next_state, reward, done, info = env.step(action)
         next_state=preprocess(next_state)
-        rewards.append(reward)
+        agent.replay_buffer.append([state,action,reward,next_state])
+        agent.learn()
         episode_reward+=reward
         # agent.save()
         if done:
@@ -219,7 +242,6 @@ def train(agent,env):
             break
         state = next_state
     episode_reward = int(episode_reward)
-    agent.learn(torch.stack(frames),actions,rewards)
     return episode_reward
 
 # 测试函数
@@ -252,19 +274,18 @@ def draw(rewards):
 
 
 agent=Breakout_agent(env)
-# agent.load()
+# agent.Load()
 
 episode_rewards=[]
 for episode in range(agent.train_episode):
     episode_reward=train(agent,env)
     print("train episode:",episode+1,"reward:",episode_reward)
     episode_rewards.append(episode_reward)
-    if episode % 50 ==0:
-        agent.save_dqn()
-        agent.save_act()
+    if (episode+1) % 50 ==0:
+        agent.Save()
 draw(episode_rewards)
 
-agent.save()
+agent.Save()
 
 episode_rewards=[]
 for episode in range(agent.test_episode):

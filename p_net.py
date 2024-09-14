@@ -59,7 +59,7 @@ class DQN_Q_Net(nn.Module):
 
 class Breakout_agent:
     def __init__(self,env,action_n=6,gamma=0.99, batch_size=64,
-                 learning_rate=0.0001,train_episode=5000,test_episode=5000,
+                 learning_rate=0.00001,train_episode=5000,test_episode=5000,
                  replay_buffer_size=10000):
         # 智能体参数
         self.learning_rate=learning_rate
@@ -89,7 +89,7 @@ class Breakout_agent:
             probs=self.net.forward(state)
         probs=probs.squeeze(0)
         probs = probs.cpu().numpy()
-        return probs.argmax().numpy() 
+        return probs.argmax()
     # 奖励衰减函数
     def calc_reward_to_go(self,reward_list, gamma=0.99):
         reward_arr = np.array(reward_list)
@@ -138,7 +138,7 @@ def preprocess(image):
 
 # 训练函数
 def train(agent,env):
-    # env.render()
+    env.render()
     episode_reward=0
     state=env.reset()
     state=preprocess(state)
@@ -160,7 +160,7 @@ def train(agent,env):
         state = next_state
     episode_reward = int(episode_reward)
     loss=agent.learn(torch.stack(frames),actions,rewards)
-    print(loss)
+    # print(loss)
     return episode_reward
 
 # 测试函数
@@ -193,16 +193,16 @@ def draw(rewards):
 
 
 agent=Breakout_agent(env)
-# agent.load()
+agent.load()
 
 episode_rewards=[]
 for episode in range(agent.train_episode):
     episode_reward=train(agent,env)
     print("train episode:",episode+1,"reward:",episode_reward)
     episode_rewards.append(episode_reward)
-    if episode % 50 ==0:
+    if (episode+1) % 50 ==0:
         agent.save()
-# draw(episode_rewards)
+draw(episode_rewards)
 
 agent.save()
 
