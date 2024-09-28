@@ -1,5 +1,4 @@
 # 使用DQN网络，一帧一帧传入，基于价值选取动作,加入经验回放，利用经验池更新网络参数
-
 import gym
 import time
 import cv2 as cv
@@ -96,17 +95,17 @@ class Breakout_agent:
             return 
         experiences = random.sample(self.replay_buffer,self.batch_size)
         states,actions,rewards,next_states,dones=zip(*experiences)
-        states = torch.stack(states)
-        next_states = torch.stack(next_states)
-        actions = torch.stack(actions).unsqueeze(1)
-        dones = torch.stack(dones).unsqueeze(1)
-        rewards = torch.stack(rewards).unsqueeze(1)
+        states = torch.stack(states).to(device)
+        next_states = torch.stack(next_states).to(device)
+        actions = torch.stack(actions).unsqueeze(1).to(device)
+        dones = torch.stack(dones).unsqueeze(1).to(device)
+        rewards = torch.stack(rewards).unsqueeze(1).to(device)
         # 计算Q值
         Q_value = self.net(states).gather(1,actions)
         with torch.no_grad():
             next_Q_value = self.target_net(next_states).max(1)[0].view(-1,1)
         new_Q_value =rewards + self.gamma * next_Q_value
-        loss = torch.mean(nn.functional.mse_loss(Q_value,new_Q_value))
+        loss = torch.mean(nn.functional.mse_loss(Q_value.squeeze(),new_Q_value.squeeze()))
         self.optimizer.zero_grad()
         loss.backward()
         self.optimizer.step()
@@ -181,7 +180,7 @@ def test(agent,env):
     # state=torch.flatten(state)
     state=state.to(device).unsqueeze(0)
     while True:
-        env.render()
+        # env.render()
         action=agent.decide(state.unsqueeze(0))
         next_state, reward, done, info = env.step(action)
         next_state=preprocess(next_state)

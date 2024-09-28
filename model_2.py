@@ -531,7 +531,7 @@ for episode in range(agent.train_episode):
     episode_reward=train(agent,env)
     print("train episode:",episode+1,"reward:",episode_reward)
     episode_rewards.append(episode_reward)
-    draw(episode_rewards)
+draw(episode_rewards)
 # 测试
 episode_rewards=[]
 for episode in range(agent.test_episode):
